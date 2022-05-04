@@ -56,8 +56,6 @@ The solution operates as follows:
 1.	As all workloads are now visible in the central account, the dashboards referenced in AWS WA labs can be used to further examine them and derive insights on common issues.
 
 ![Architecture Diagram](DistributedWellArchitected-Horizontal-Eventbridge-annotated.png)
-SVG will be used when on github
-<img src="./DistributedWellArchitected-Horizontal-Eventbridge-annotated.svg">
 
 ## How to deploy
 
