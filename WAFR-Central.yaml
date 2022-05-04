@@ -1,0 +1,428 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Template defining WAFR automation resources for the central template account
+
+Parameters:
+  OrganizationID:
+    Type: String
+    Description: Enter the Organization ID which will be granted publish permission to an SNS topic
+  TemplatePrefix:
+    Type: String
+    Default: CentralTemplate
+    Description: Enter the prefix used to identify Template workloads eg. Template
+  LambdaLogLevel:
+    Type: String
+    Default: ERROR
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+      - CRITICAL
+    Description: Default log level for all lambda functions deployed
+
+Resources:
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: UpdateWAFRAnswers
+      StateMachineType: STANDARD
+      DefinitionString: |-
+        {
+          "Comment": "Update Shared Well Architected Reviews from a centrally controlled template",
+          "StartAt": "GetWorkloads",
+          "States": {
+            "GetWorkloads": {
+              "Type": "Task",
+              "Resource": "${GetWAFRWorkloadIDs}",
+              "Next": "Update-All"
+            },
+            "Update-All": {
+              "Type": "Map",
+              "ItemsPath": "$.Workloads",
+              "MaxConcurrency": 5,
+              "Iterator": {
+                "StartAt": "Update",
+                "States": {
+                  "Update": {
+                    "Type": "Task",
+                    "Resource": "${WAFRUpdateAnswers}",
+                    "End": true
+                  }
+                }
+              },
+              "Next": "NotifySNS"
+            },
+            "NotifySNS": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${WAFRTemplateUpdateNotification}",
+                "Message": "{\"default\": \"Well Architected Templates have been updated. Please review in your workload account\"}"
+              },
+              "End": true
+            }
+          }
+        }
+      DefinitionSubstitutions:
+        GetWAFRWorkloadIDs: !GetAtt GetWAFRWorkloadIDs.Arn
+        WAFRUpdateAnswers: !GetAtt WAFRUpdateAnswers.Arn
+        WAFRTemplateUpdateNotification: !Ref TemplateUpdateNotificationTopic
+      RoleArn: !GetAtt WAFRAutomationStepFunctionRole.Arn
+    DependsOn:
+      - WAFRUpdateAnswers
+      - GetWAFRWorkloadIDs
+
+  WAFRUpdateAnswers:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ./WAFR-UpdateAnswers/lambda_function.py
+      Description: Updates the answers in a given WAFR based on the template
+      FunctionName: WAFRUpdateAnswers
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt WAFRLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Layers:
+        - !Ref LambdaLayerDecorators
+      Timeout: 60
+      Environment:
+        Variables:
+          MODE: append
+          TEMPLATE_PREFIX: !Ref TemplatePrefix
+          LOGLEVEL: !Ref LambdaLogLevel
+      Architectures:
+        - arm64
+
+  GetWAFRWorkloadIDs:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ./WAFR-GetWorkloadIDs/lambda_function.py
+      Description: Gets the workload IDs for WAFR workloads shared with this account
+      FunctionName: GetWAFRWorkloadIDs
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt WAFRLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Layers:
+        - !Ref LambdaLayerDecorators
+      Timeout: 5
+      Environment:
+        Variables:
+          TEMPLATE_PREFIX: !Ref TemplatePrefix
+          LOGLEVEL: !Ref LambdaLogLevel
+      Architectures:
+        - arm64
+
+  WAFRShareAccept:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ./WAFR-ShareAccept/lambda_function.py
+      Description: Accepts incoming WAFR share
+      FunctionName: WAFRShareAccept
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt WAFRLambdaShareAcceptExecutionRole.Arn
+      Runtime: python3.9
+      Layers:
+        - !Ref LambdaLayerDecorators
+      Timeout: 5
+      Environment:
+        Variables:
+          UPDATE_FUNCTION : !Ref WAFRUpdateAnswers
+          SHARE_TEMPLATE_FUNCTION: !Ref WAFRShareTemplate
+          LOGLEVEL: !Ref LambdaLogLevel
+      Architectures:
+        - arm64
+
+  WAFRShareTemplate:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ./WAFR-ShareTemplate/lambda_function.py
+      Description: Shares WAFR Templates with workload accounts
+      FunctionName: WAFRShareTemplate
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt WAFRLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Layers:
+        - !Ref LambdaLayerDecorators
+      Timeout: 5
+      Environment:
+        Variables:
+          TEMPLATE_PREFIX : !Ref TemplatePrefix
+          LOGLEVEL: !Ref LambdaLogLevel
+      Architectures:
+        - arm64
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref IncomingShareTopic
+      FunctionName: !GetAtt WAFRShareAccept.Arn
+
+  WAFRLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/service-role/"
+      Policies:
+      - PolicyName: logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+      - PolicyName: well-architected
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - wellarchitected:GetAnswer
+            - wellarchitected:ListAnswers
+            - wellarchitected:ListLensReviews
+            - wellarchitected:UpdateAnswer
+            - wellarchitected:UpdateShareInvitation
+            - wellarchitected:CreateWorkloadShare
+            - wellarchitected:ListWorkloadShares
+            Resource: !Sub arn:aws:wellarchitected:${AWS::Region}:*:*
+          - Effect: Allow
+            Action: wellarchitected:ListWorkloads
+            Resource: "*"
+      - PolicyName: sns-publish
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - "sns:Publish"
+            Resource: !Sub "arn:aws:sns:${AWS::Region}:*:WAFRTemplateShareTopic"
+
+  WAFRLambdaShareAcceptExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/service-role/"
+      Policies:
+      - PolicyName: logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+      - PolicyName: well-architected
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - wellarchitected:UpdateShareInvitation
+            Resource: !Sub arn:aws:wellarchitected:${AWS::Region}:${AWS::AccountId}:*
+      - PolicyName: lambda-invoke
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - "lambda:InvokeFunction"
+            Resource:
+            - !GetAtt WAFRUpdateAnswers.Arn
+            - !GetAtt WAFRShareTemplate.Arn
+
+  IncomingShareTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: IncomingShareTopicPolicy
+        Version: '2012-10-17'
+        Statement:
+        - Sid: allow-org-publish
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Action: sns:Publish
+          Resource: !Ref IncomingShareTopic
+          Condition:
+            StringEquals:
+              "aws:PrincipalOrgId": !Ref OrganizationID
+      Topics:
+      - !Ref IncomingShareTopic
+
+  TemplateUpdateNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: WAFRTemplateUpdatedTopic
+
+  TemplateUpdateNotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: TemplateUpdateNotificationTopicPolicy
+        Version: '2012-10-17'
+        Statement:
+        - Sid: allow-stepfunctions-publish
+          Effect: Allow
+          Principal:
+            Service:
+            - states.amazonaws.com
+          Action: sns:Publish
+          Resource: !Ref TemplateUpdateNotificationTopic
+        - Sid: allow-org-subscribe
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Action:
+            - "sns:GetTopicAttributes"
+            - "sns:Subscribe"
+          Resource: !Ref IncomingShareTopic
+          Condition:
+            StringEquals:
+              "aws:PrincipalOrgId": !Ref OrganizationID
+      Topics:
+      - !Ref TemplateUpdateNotificationTopic
+
+  WAFRAutomationStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - states.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/service-role/"
+      Policies:
+      - PolicyName: sns
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref TemplateUpdateNotificationTopic
+      - PolicyName: logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogDelivery
+            - logs:GetLogDelivery
+            - logs:UpdateLogDelivery
+            - logs:DeleteLogDelivery
+            - logs:ListLogDeliveries
+            - logs:PutResourcePolicy
+            - logs:DescribeResourcePolicies
+            - logs:DescribeLogGroups
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+      - PolicyName: lambda-invoke
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - "lambda:InvokeFunction"
+            Resource:
+            - !GetAtt WAFRUpdateAnswers.Arn
+            - !GetAtt GetWAFRWorkloadIDs.Arn
+
+  WAFRMilestoneEventbridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: EventBridge rule to trigger update workflow on milestone creation
+      EventPattern: {
+        "source": ["aws.wellarchitected"],
+        "detail": {
+          "eventName": ["CreateMilestone"]
+          }
+        }
+      Name: WAFR-NewMilestoneRule
+      RoleArn: !GetAtt WAFRAutomationEventbridgeRole.Arn
+      Targets:
+        - Arn: !GetAtt StateMachine.Arn
+          RoleArn: !GetAtt WAFRAutomationEventbridgeRole.Arn
+          Id: StepFunctionStateMachine
+          InputPath: $.detail.responseElements
+
+  WAFRAutomationEventbridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - events.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/service-role/"
+      Policies:
+      - PolicyName: stepfunctions-invoke
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - "states:StartExecution"
+            Resource:
+            - !GetAtt StateMachine.Arn
+
+  IncomingShareTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: WAFRNewWorkloadShareTopic
+      Subscription:
+        - Endpoint: !GetAtt WAFRShareAccept.Arn
+          Protocol: "lambda"
+
+  LambdaLayerDecorators:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      Content: ./WAFR-Decorators
+      CompatibleArchitectures:
+        - arm64
+      CompatibleRuntimes:
+        - python3.9
+      Description: "Decorator functions including error handling for boto3 calls"
+      LayerName: WAFR-Decorators
+
+Outputs:
+  WAFRNewWorkloadShareTopicARN:
+    Description: ARN of the SNS topic used to accept new workload shares. This is used as an input for workload account stacks
+    Value: !Ref IncomingShareTopic
+
+  WAFRTemplateUpdateNotificationTopicARN:
+    Description: ARN of the SNS topic used to notify subscribers of any updates to the template workloads
+    Value: !Ref TemplateUpdateNotificationTopic
