@@ -1,0 +1,192 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Template defining WAFR automation resources for the central template account
+
+Parameters:
+  OrganizationID:
+    Type: String
+    Description: Enter the Organization ID which will be granted publish permission to an SNS topic
+  TemplateAccountID:
+    Type: String
+    Description: Enter the AWS Account ID of the account you are holding your templates.
+    AllowedPattern: ^[0-9]{12}$
+    ConstraintDescription: Must contain a 12-digit AWS account AccountId
+  AWSTeamAccountID:
+    Type: String
+    Description: (Optional) Enter the AWS account ID of your AWS account team's WAFR sharing account.
+    AllowedPattern: ^$|^[0-9]{12}$
+    ConstraintDescription: Must contain empty string or a 12-digit AWS account AccountId
+  WAFRNewWorkloadShareTopicARN:
+    Type: String
+    Description: Enter the ARN of the WAFRNewWorkloadShareTopic SNS topic in the central Well-Architected account.
+  LambdaLogLevel:
+    Type: String
+    Default: ERROR
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+      - CRITICAL
+    Description: Default log level for all lambda functions deployed
+
+Conditions:
+  HasAWSTeamAccountID: !Not [!Equals ["", !Ref AWSTeamAccountID]]
+
+Resources:
+  WAFRShareWorkload:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ./WAFR-ShareWorkload/lambda_function.py
+      Description: Shares workload with central account
+      FunctionName: WAFRShareWorkload
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt WAFRLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Layers:
+        - !Ref LambdaLayerDecorators
+      Timeout: 10
+      Environment:
+        Variables:
+          TEMPLATE_ACCOUNT_ID: !Ref TemplateAccountID
+          AWS_TEAM_ACCOUNT_ID: !If [HasAWSTeamAccountID, !Ref AWSTeamAccountID, !Ref AWS::NoValue]
+          NEW_WORKLOAD_TOPIC_ARN: !Ref WAFRNewWorkloadShareTopicARN
+          INCOMING_SHARE_TOPIC_ARN: !Ref IncomingShareTopic
+          LOGLEVEL: !Ref LambdaLogLevel
+      Architectures:
+        - arm64
+
+  WAFRNewWorkloadEventbridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: EventBridge rule to trigger sharing workflow on new workload creation
+      EventPattern: {
+        "source": ["aws.wellarchitected"],
+        "detail": {
+          "eventName": ["CreateWorkload"]
+          }
+        }
+      Name: WAFR-NewWorkloadRule
+      Targets:
+        - Arn: !GetAtt WAFRShareWorkload.Arn
+          Id: LambdaTrigger
+          InputPath: $.detail.responseElements
+
+  EventbridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt WAFRShareWorkload.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WAFRNewWorkloadEventbridgeRule.Arn
+
+  WAFRLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/service-role/"
+      Policies:
+      - PolicyName: logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+      - PolicyName: sns-publish
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - "sns:Publish"
+            Resource: !Ref WAFRNewWorkloadShareTopicARN
+      - PolicyName: well-architected
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - wellarchitected:CreateWorkloadShare
+            - wellarchitected:ListShareInvitations
+            - wellarchitected:ListWorkloadShares
+            - wellarchitected:UpdateShareInvitation
+            Resource: !Sub arn:aws:wellarchitected:${AWS::Region}:*:*
+
+  IncomingShareTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: IncomingShareTopicPolicy
+        Version: '2012-10-17'
+        Statement:
+        - Sid: allow-org-publish
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Action: sns:Publish
+          Resource: !Ref IncomingShareTopic
+          Condition:
+            StringEquals:
+              "aws:PrincipalOrgId": !Ref OrganizationID
+      Topics:
+      - !Ref IncomingShareTopic
+
+  IncomingShareTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: WAFRTemplateShareTopic
+      Subscription:
+        - Endpoint: !GetAtt WAFRTemplateShareAccept.Arn
+          Protocol: "lambda"
+
+  WAFRTemplateShareAccept:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ./WAFR-TemplateShareAccept/lambda_function.py
+      Description: Accepts incoming WAFR share
+      FunctionName: WAFRTemplateShareAccept
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt WAFRLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Layers:
+        - !Ref LambdaLayerDecorators
+      Environment:
+        Variables:
+          LOGLEVEL: !Ref LambdaLogLevel
+      Timeout: 5
+      Architectures:
+        - arm64
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref IncomingShareTopic
+      FunctionName: !GetAtt WAFRTemplateShareAccept.Arn
+
+  LambdaLayerDecorators:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      Content: ./WAFR-Decorators
+      CompatibleArchitectures:
+        - arm64
+      CompatibleRuntimes:
+        - python3.9
+      Description: "Decorator functions including error handling for boto3 calls"
+      LayerName: WAFR-Decorators
