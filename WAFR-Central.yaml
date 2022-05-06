@@ -11,6 +11,13 @@ Parameters:
     Type: String
     Default: CentralTemplate
     Description: Enter the prefix used to identify Template workloads eg. Template
+  UpdateMode:
+    Type: String
+    Default: append
+    AllowedValues:
+      - append
+      - overwrite
+    Description: Set the update lambda function to append template answers to workloads or overwrite workload answers with template answers. Allowed values are [append, overwrite]
   LambdaLogLevel:
     Type: String
     Default: ERROR
@@ -89,7 +96,7 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
-          MODE: append
+          MODE: !Ref UpdateMode
           TEMPLATE_PREFIX: !Ref TemplatePrefix
           LOGLEVEL: !Ref LambdaLogLevel
       Architectures:
