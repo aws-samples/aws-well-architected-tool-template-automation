@@ -93,7 +93,7 @@ Resources:
       Runtime: python3.9
       Layers:
         - !Ref LambdaLayerDecorators
-      Timeout: 60
+      Timeout: 180
       Environment:
         Variables:
           MODE: !Ref UpdateMode
@@ -114,7 +114,7 @@ Resources:
       Runtime: python3.9
       Layers:
         - !Ref LambdaLayerDecorators
-      Timeout: 5
+      Timeout: 10
       Environment:
         Variables:
           TEMPLATE_PREFIX: !Ref TemplatePrefix
