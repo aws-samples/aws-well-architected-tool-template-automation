@@ -36,7 +36,7 @@ def getWorkloadIDs():
 def stripCentralTemplate(workloadIDs):
     logger.debug(workloadIDs)
     templatePrefix = os.environ.get('TEMPLATE_PREFIX', 'CentralTemplate')
-    res = [i for i in workloadIDs if not (i['WorkloadName'] == templatePrefix)]
+    res = [i for i in workloadIDs if not (templatePrefix in i['WorkloadName'] )]
     return (res)
 
 
