@@ -1,5 +1,11 @@
 # AWS-Well-Architected-Tool-Template-Automation
 
+## Here for the first time?
+
+In October 2023, AWS released [Well-Architected Templates](https://aws.amazon.com/about-aws/whats-new/2023/10/reduce-duplication-well-architected-templates/) as a service feature which provides much of the functionality and features of this project and more. If you are looking at using Well-Architected Templates in your org, we strongly suggest you use the in-built service feature rather than this project. This project will remain for customers that may have adopted it before the launch of the service feature.
+
+You can read more about using AWS Well-Architected Templates at the [AWS docs](https://docs.aws.amazon.com/wellarchitected/latest/userguide/review-templates.html).
+
 ## Overview
 
 This sample provides a way for customers with distributed development teams to maintain consistency with Well-Architected Review answers.
